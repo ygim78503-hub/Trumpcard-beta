@@ -1,0 +1,426 @@
+/* ===== 1. 네트워크 설정 및 통신 (MQTT 공개 중계서버) ===== */
+let client = null, isHost = false, myNum = 0, roomCode = '', guestHere = false;
+const BROKERS = ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt'];
+
+// DOM 헬퍼 및 유틸리티
+const $ = id => document.getElementById(id);
+const lobbyMsg = t => $('lobby-msg').innerText = t;
+const rnd = () => Math.random().toString(36).slice(2, 7).toUpperCase().padEnd(5, 'X');
+const T = s => `onecard-v2/${roomCode}/${s}`;
+const pub = (topic, obj, retain) => { 
+  if (client) client.publish(topic, JSON.stringify(obj), { qos: 1, retain: !!retain }); 
+};
+
+/**
+ * MQTT 브로커 순차 연결 시도
+ */
+function connectMqtt(onReady) {
+  let i = 0;
+  const next = () => {
+    if (i >= BROKERS.length) return lobbyMsg('서버 연결 실패. 잠시 후 다시 시도');
+    lobbyMsg('서버 연결 중...');
+    const c = mqtt.connect(BROKERS[i++], {
+      connectTimeout: 6000, 
+      reconnectPeriod: 0, 
+      clientId: 'oc_' + Math.random().toString(16).slice(2)
+    });
+    let settled = false;
+    const fail = () => { 
+      if (settled) return; 
+      settled = true; 
+      c.end(true); 
+      next(); 
+    };
+    const timer = setTimeout(fail, 7000);
+    c.on('error', fail);
+    c.on('connect', () => {
+      if (settled) return;
+      settled = true; 
+      clearTimeout(timer);
+      client = c; 
+      c.options.reconnectPeriod = 3000;
+      c.on('message', onMsg);
+      onReady();
+    });
+  };
+  next();
+}
+
+/**
+ * 방 만들기 (호스트)
+ */
+function createRoom() {
+  isHost = true; myNum = 1; roomCode = rnd();
+  connectMqtt(() => {
+    client.subscribe(T('host'), { qos: 1 }, () => {
+      pub(T('g'), { wait: true }, true);
+      lobbyMsg('방 코드: ' + roomCode + ' — 친구에게 알려주세요');
+    });
+  });
+}
+
+/**
+ * 방 입장하기 (게스트)
+ */
+function joinRoom() {
+  const code = $('code-in').value.trim().toUpperCase();
+  if (code.length !== 5) return lobbyMsg('코드 5자리를 입력하세요');
+  isHost = false; myNum = 2; roomCode = code;
+  connectMqtt(() => {
+    let got = false;
+    client.subscribe(T('g'), { qos: 1 }, () => {
+      pub(T('host'), { t: 'hello' });
+      setTimeout(() => { if (!got) lobbyMsg('방을 찾을 수 없어요'); }, 5000);
+    });
+    client._gotRef = () => { got = true; };
+  });
+}
+
+/**
+ * 수신된 MQTT 메시지 처리
+ */
+function onMsg(topic, payload) {
+  let m; 
+  try { m = JSON.parse(payload.toString()); } catch (e) { return; }
+
+  if (isHost && topic === T('host')) {
+    if (m.t === 'hello') {
+      if (!guestHere) {
+        guestHere = true;
+        $('lobby').classList.add('hidden');
+        $('msg').innerText = '상대 입장! 게임 시작을 눌러주세요.';
+        $('start-btn').classList.remove('hidden');
+      }
+      if (G) broadcast();
+    } else {
+      handle(2, m);
+    }
+  } else if (!isHost && topic === T('g')) {
+    if (client._gotRef) client._gotRef();
+    $('lobby').classList.add('hidden');
+    if (m.wait) { 
+      $('msg').innerText = '방장이 시작하길 기다리는 중...'; 
+      return; 
+    }
+    V = m; 
+    render();
+  }
+}
+
+/**
+ * 플레이어 액션 전송 (호스트는 직접 실행, 게스트는 호스트로 전송)
+ */
+function act(a) { 
+  if (isHost) handle(1, a); 
+  else pub(T('host'), a); 
+}
+
+
+/* ===== 2. 게임 핵심 로직 (호스트에서 연산 후 동기화) ===== */
+const SUITS = [
+  { s: '♠', c: 'text-black-suit' },
+  { s: '♥', c: 'text-red-suit' },
+  { s: '◆', c: 'text-red-suit' },
+  { s: '♣', c: 'text-black-suit' }
+];
+const VALUES = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+let G = null;
+const other = p => p === 1 ? 2 : 1;
+
+/**
+ * 게임 액션 분기 처리
+ */
+function handle(p, a) {
+  if (a.t === 'start') return newGame();
+  if (!G || !G.active) return;
+  if (a.t === 'suit') return pickSuit(p, a.s);
+  if (G.await || p !== G.turn) return;
+  if (a.t === 'play') play(p, a.i);
+  else if (a.t === 'draw') draw(p);
+  else if (a.t === 'pass') pass(p);
+}
+
+/**
+ * 새 게임 초기화 및 카드 분배
+ */
+function newGame() {
+  const deck = []; 
+  let id = 1;
+  SUITS.forEach(su => VALUES.forEach(v => deck.push({ id: id++, isJk: false, s: su.s, c: su.c, v })));
+  deck.push({ id: id++, isJk: true, s: '🃏', c: 'text-red-suit', v: 'RED JOKER' });
+  deck.push({ id: id++, isJk: true, s: '🃏', c: 'text-black-suit', v: 'BLK JOKER' });
+  deck.sort(() => Math.random() - 0.5);
+
+  G = { 
+    deck, h: { 1: [], 2: [] }, top: null, suit: '', 
+    turn: Math.random() < 0.5 ? 1 : 2, stack: 0, atk: null, 
+    drewA: false, active: true, await: 0, msg: '', end: null 
+  };
+
+  // 각 플레이어에게 5장씩 지급
+  for (let i = 0; i < 5; i++) { 
+    G.h[1].push(deck.pop()); 
+    G.h[2].push(deck.pop()); 
+  }
+
+  // 첫 바닥 카드는 특수 카드를 제외하고 오픈
+  while (true) {
+    const t = deck.pop();
+    if (t.isJk || ['A', '2', '7', 'J', 'Q', 'K'].includes(t.v)) { 
+      deck.unshift(t); 
+      deck.sort(() => Math.random() - 0.5); 
+    } else { 
+      G.top = t; 
+      break; 
+    }
+  }
+  G.suit = G.top.s;
+  G.msg = `게임 시작! Player ${G.turn} 선공.`;
+  $('start-btn').classList.add('hidden');
+  broadcast();
+}
+
+/**
+ * 카드 낼 수 있는지 유효성 검사 (호스트용)
+ */
+function isValid(c) {
+  if (G.stack > 0) {
+    if (G.atk === '2') return c.v === '2';
+    if (G.atk === 'JOKER') return c.isJk;
+    if (G.atk === 'A') return c.v === 'A' || c.isJk;
+    return false;
+  }
+  if (c.isJk || c.v === '7') return true;
+  return G.top.isJk || c.s === G.suit || c.v === G.top.v;
+}
+
+/**
+ * 카드 내기 처리
+ */
+function play(p, i) {
+  const c = G.h[p][i];
+  if (!c) return;
+  if (!isValid(c)) { 
+    G.msg = '낼 수 없는 카드입니다!'; 
+    return broadcast(); 
+  }
+
+  G.h[p].splice(i, 1); 
+  G.top = c; 
+  G.drewA = false;
+  if (!c.isJk) G.suit = c.s;
+
+  let next = other(p), m7 = false;
+  if (c.v === 'A') { G.stack += 5; G.atk = 'A'; G.msg = 'A 공격 +5장!'; }
+  else if (c.v === '2') { G.stack += 2; G.atk = '2'; G.msg = '2 공격 +2장!'; }
+  else if (c.isJk) { G.stack += 10; G.atk = 'JOKER'; G.msg = '조커 공격 +10장!'; }
+  else if (c.v === '7') m7 = true;
+  else if (['J', 'Q', 'K'].includes(c.v)) { next = p; G.msg = `${c.v} 발동 (턴 유지)`; }
+  else G.msg = `Player ${p}가 ${c.v}를 냈습니다.`;
+
+  if (checkEnd(p)) return broadcast();
+  if (m7) { 
+    G.await = p; 
+    G.msg = `Player ${p}가 문양 선택 중...`; 
+  } else {
+    G.turn = next;
+  }
+  broadcast();
+}
+
+/**
+ * 숫자 7 문양 선택 완료 처리
+ */
+function pickSuit(p, s) {
+  if (G.await !== p) return;
+  G.suit = s; 
+  G.await = 0; 
+  G.turn = other(p);
+  G.msg = `문양 변경: ${s}. Player ${G.turn} 차례!`;
+  broadcast();
+}
+
+/**
+ * 덱에서 카드 뽑기 (일반 드로우 및 공격 벌칙 드로우)
+ */
+function draw(p) {
+  const hand = G.h[p];
+  const n = G.stack > 0 ? G.stack : 1, type = G.atk;
+  for (let i = 0; i < n; i++) {
+    if (!G.deck.length) { 
+      G.active = false; 
+      G.end = { title: '덱 소진', desc: '무승부!' }; 
+      return broadcast(); 
+    }
+    hand.push(G.deck.pop());
+  }
+  if (G.stack > 0) {
+    G.stack = 0; 
+    G.atk = null;
+    if (checkEnd(p)) return broadcast();
+    if (type === 'A') { 
+      G.drewA = true; 
+      G.msg = `A 벌칙 획득! 카드를 내거나 턴 넘기기`; 
+    } else { 
+      G.turn = other(p); 
+      G.drewA = false; 
+      G.msg = '벌칙 카드 획득 후 턴 패스!'; 
+    }
+  } else {
+    G.drewA = false;
+    if (checkEnd(p)) return broadcast();
+    G.turn = other(p); 
+    G.msg = '덱에서 1장 뽑고 턴 종료.';
+  }
+  broadcast();
+}
+
+/**
+ * 턴 넘기기 (A 공격 방어 실패 드로우 후)
+ */
+function pass(p) {
+  if (!G.drewA) return;
+  G.drewA = false; 
+  G.turn = other(p); 
+  G.msg = '턴을 넘겼습니다.';
+  broadcast();
+}
+
+/**
+ * 승리 및 파산 조건 확인
+ */
+function checkEnd(p) {
+  const opp = other(p), n = G.h[p].length;
+  if (n === 0) { 
+    G.active = false; 
+    G.end = { title: `PLAYER ${p} 승리!`, desc: '모든 손패를 털었습니다!' }; 
+    return true; 
+  }
+  if (n >= 26) { 
+    G.active = false; 
+    G.end = { title: `PLAYER ${opp} 승리! (파산)`, desc: '손패가 26장이 되어 파산했습니다!' }; 
+    return true; 
+  }
+  return false;
+}
+
+/**
+ * 각 플레이어 시점에 맞춘 상태 뷰 생성
+ */
+function viewFor(p) {
+  return { 
+    me: p, myHand: G.h[p], oppCount: G.h[other(p)].length, deckCnt: G.deck.length, 
+    top: G.top, suit: G.suit, turn: G.turn, stack: G.stack, atk: G.atk, 
+    drewA: G.drewA, active: G.active, await: G.await, msg: G.msg, end: G.end 
+  };
+}
+
+/**
+ * 호스트 화면 갱신 및 게스트에게 상태 전파
+ */
+function broadcast() {
+  V = viewFor(1); 
+  render();
+  pub(T('g'), viewFor(2), true);
+}
+
+
+/* ===== 3. UI 및 화면 렌더링 ===== */
+let V = null;
+
+/**
+ * 클라이언트 측 UI 하이라이트용 낼 수 있는 카드 판별
+ */
+function checkPlayable(c, top, stack, atk, suit) {
+  if (stack > 0) {
+    if (atk === '2') return c.v === '2';
+    if (atk === 'JOKER') return c.isJk;
+    if (atk === 'A') return c.v === 'A' || c.isJk;
+    return false;
+  }
+  if (c.isJk || c.v === '7') return true;
+  return top.isJk || c.s === suit || c.v === top.v;
+}
+
+/**
+ * 카드 DOM 엘리먼트 생성
+ */
+function cardEl(c, onclick, mini, isPlayable) {
+  const el = document.createElement('div');
+  if (!c) { 
+    el.className = 'card card-back' + (mini ? ' mini' : ''); 
+    return el; 
+  }
+  
+  if (c.isJk) {
+    el.className = `card card-joker flex flex-col justify-between p-2 ${mini ? 'mini' : ''} ${isPlayable ? 'playable' : (onclick ? 'disabled' : '')}`;
+    el.innerHTML = `
+      <div class="flex flex-col leading-none ${c.c}"><span class="text-xs font-black">JK</span><span class="text-xs">🃏</span></div>
+      <div class="text-center text-2xl ${c.c} my-auto animate-pulse">🃏</div>
+      <div class="flex flex-col leading-none ${c.c} rot180 items-end"><span class="text-xs font-black">JK</span><span class="text-xs">🃏</span></div>`;
+  } else {
+    el.className = `card flex flex-col justify-between p-2 ${mini ? 'mini' : ''} ${isPlayable ? 'playable' : (onclick ? 'disabled' : '')}`;
+    el.innerHTML = `
+      <div class="flex flex-col leading-none ${c.c}"><span class="text-xs font-black">${c.v}</span><span class="text-xs">${c.s}</span></div>
+      <div class="text-center text-xl font-bold ${c.c} my-auto">${c.s}</div>
+      <div class="flex flex-col leading-none ${c.c} rot180 items-end"><span class="text-xs font-black">${c.v}</span><span class="text-xs">${c.s}</span></div>`;
+  }
+  if (onclick && isPlayable) el.onclick = onclick;
+  return el;
+}
+
+/**
+ * 전체 게임 화면 상태 업데이트
+ */
+function render() {
+  const mh = $('my-hand'), oh = $('opp-hand'), ds = $('discard');
+  mh.innerHTML = ''; oh.innerHTML = ''; ds.innerHTML = '';
+  if (!V) return;
+
+  const mine = V.active && V.turn === V.me;
+
+  // 내 손패 렌더링 (낼 수 있는 카드 하이라이트 적용)
+  V.myHand.forEach((c, i) => {
+    const playable = mine && !V.await && checkPlayable(c, V.top, V.stack, V.atk, V.suit);
+    mh.appendChild(cardEl(c, () => act({ t: 'play', i }), false, playable));
+  });
+
+  // 상대 손패 (뒷면)
+  for (let i = 0; i < V.oppCount; i++) {
+    oh.appendChild(cardEl(null, null, true));
+  }
+
+  // 바닥 카드
+  if (V.top) ds.appendChild(cardEl(V.top));
+
+  // 텍스트 및 상태 업데이트
+  $('my-cnt').innerText = V.myHand.length + '장';
+  $('opp-cnt').innerText = V.oppCount + '장';
+  $('deck-cnt').innerText = V.deckCnt + '장';
+  $('turn-txt').innerText = !V.active ? '-' : (mine ? '내 차례!' : '상대 차례');
+
+  const st = $('suit-txt'); 
+  st.innerText = V.suit || '-';
+  st.className = (V.suit === '♥' || V.suit === '◆') ? 'text-lg text-red-suit font-black' : 'text-lg text-white font-black';
+
+  $('stack-txt').innerText = V.stack + '장';
+  $('stack-txt').className = V.stack > 0 ? 'text-red-400 font-mono text-sm font-black animate-pulse' : 'text-red-400 font-mono text-sm';
+  
+  $('atk-txt').innerText = V.atk || '없음';
+
+  // 배지 및 버튼 토글
+  $('my-badge').classList.toggle('hidden', !mine);
+  $('opp-badge').classList.toggle('hidden', !(V.active && V.turn !== V.me));
+  $('pass-btn').classList.toggle('hidden', !(mine && V.drewA && !V.await));
+  $('msg').innerText = V.msg;
+  $('modal').classList.toggle('hidden', V.await !== V.me);
+  $('end-modal').classList.toggle('hidden', !V.end);
+  
+  if (V.end) { 
+    $('end-title').innerText = V.end.title; 
+    $('end-desc').innerText = V.end.desc; 
+  }
+
+  // 내 차례일 때 전체 화면 테두리 글로우 효과 적용
+  $('main-container').classList.toggle('my-turn-glow', mine);
+}
