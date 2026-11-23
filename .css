@@ -1,0 +1,85 @@
+/* 전체 배경 및 기본 설정 */
+body {
+background: radial-gradient(circle, #1b4d2e 0%, #0d2a18 70%, #05140b 100%);
+user-select: none;
+overflow: hidden;
+font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+​/* 기본 카드 디자인 */
+.card {
+width: 80px;
+height: 112px;
+border-radius: 10px;
+transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+cursor: pointer;
+background: #ffffff;
+box-shadow: 0 6px 15px rgba(0, 0, 0, 0.4);
+border: 2px solid #cbd5e1;
+flex-shrink: 0;
+position: relative;
+}
+​/* 낼 수 있는 카드 호버 효과 */
+.card:hover:not(.disabled) {
+transform: translateY(-10px) scale(1.03);
+box-shadow: 0 12px 25px rgba(0, 0, 0, 0.5);
+}
+​/* 낼 수 있는 카드 강조 표시 */
+.card.playable {
+border-color: #f59e0b;
+box-shadow: 0 0 15px rgba(245, 158, 11, 0.6);
+transform: translateY(-6px);
+}
+​/* 낼 수 없는 카드 비활성화 표시 */
+.card.disabled {
+opacity: 0.45;
+filter: grayscale(30%);
+cursor: not-allowed;
+}
+​/* 카드 뒷면 패턴 */
+.card-back {
+background: repeating-linear-gradient(45deg, #8a1818, #8a1818 10px, #6b1111 10px, #6b1111 20px);
+border: 3px solid #fff;
+box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+​/* 조커 카드 전용 배경 */
+.card-joker {
+background: linear-gradient(135deg, #fef08a 0%, #fde047 50%, #facc15 100%);
+border: 2px solid #eab308;
+}
+​/* 상대방 미니 카드 스타일 */
+.mini {
+width: 42px;
+height: 58px;
+border-radius: 6px;
+cursor: default;
+margin-left: -16px;
+border-width: 1px;
+box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+.mini:hover {
+transform: none;
+}
+​/* 카드가 놓이는 영역 테두리 */
+.zone {
+border: 2px dashed rgba(255, 255, 255, 0.25);
+border-radius: 16px;
+background: rgba(0, 0, 0, 0.25);
+backdrop-filter: blur(4px);
+}
+​/* 카드 하단 숫자/문양 180도 회전 */
+.rot180 {
+transform: rotate(180deg);
+}
+​/* 문양 색상 */
+.text-red-suit {
+color: #dc2626 !important;
+}
+.text-black-suit {
+color: #1e293b !important;
+}
+​/* 내 차례일 때 전체 화면 테두리 글로우 효과 */
+.my-turn-glow {
+box-shadow: inset 0 0 30px rgba(245, 158, 11, 0.35);
+border: 2px solid rgba(245, 158, 11, 0.6);
+transition: all 0.3s ease;
+}
