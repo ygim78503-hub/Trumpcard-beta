@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>온라인 원카드 - Enhanced UI</title>
+  <!-- 외부 라이브러리 (Tailwind CSS, MQTT.js) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <!-- 분리된 커스텀 스타일시트 연결 -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body id="main-container" class="h-screen w-screen text-white overflow-hidden">
+
+  <!-- 로비 모달 -->
+  <div id="lobby" class="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-md">
+    <div class="bg-gray-900 border border-amber-500/60 rounded-2xl p-7 w-full max-w-sm text-center space-y-4 shadow-2xl">
+      <div class="space-y-1">
+        <h1 class="text-2xl font-black text-amber-400 tracking-wider">온라인 원카드</h1>
+        <p class="text-xs text-gray-400">친구와 함께 즐기는 실시간 카드 대전</p>
+      </div>
+      <button onclick="createRoom()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 transition rounded-xl font-black text-sm shadow-lg shadow-emerald-900/40">방 만들기</button>
+      <div class="text-xs text-gray-500 font-medium">또는 코드로 입장</div>
+      <input id="code-in" maxlength="5" placeholder="방 코드 5자리" class="w-full p-3 rounded-xl bg-gray-800 text-center uppercase tracking-widest font-mono text-lg border border-gray-700 focus:border-amber-500 outline-none">
+      <button onclick="joinRoom()" class="w-full py-3 bg-amber-500 hover:bg-amber-400 transition text-black rounded-xl font-black text-sm shadow-lg shadow-amber-900/40">입장하기</button>
+      <div id="lobby-msg" class="text-xs text-amber-300 font-medium min-h-[20px]"></div>
+    </div>
+  </div>
+
+  <!-- 메인 게임 보드 -->
+  <div class="h-full w-full flex flex-col justify-between p-4">
+    <!-- 상대 영역 -->
+    <div class="w-full flex flex-col items-center gap-1.5">
+      <div class="flex items-center gap-2.5 bg-black/80 px-5 py-1.5 rounded-full border border-white/15 text-xs shadow-md">
+        <span class="font-bold text-gray-300">상대방</span>
+        <span id="opp-cnt" class="bg-red-950 text-red-300 px-2.5 py-0.5 rounded-full font-mono font-bold border border-red-800/50">0장</span>
+        <span id="opp-badge" class="hidden bg-amber-400 text-black px-2.5 py-0.5 rounded-full font-black animate-pulse shadow">상대 차례</span>
+      </div>
+      <div id="opp-hand" class="zone min-h-[75px] w-full max-w-4xl flex items-center justify-center p-2 pl-6 overflow-hidden"></div>
+    </div>
+
+    <!-- 중앙 게임 플레이 영역 -->
+    <div class="flex-1 w-full max-w-4xl mx-auto flex flex-col justify-between items-center my-2">
+      <!-- 게임 상태 정보 바 -->
+      <div class="bg-black/80 px-6 py-2 rounded-2xl border border-white/20 flex items-center gap-5 text-xs shadow-lg backdrop-blur-sm">
+        <span>차례: <b id="turn-txt" class="text-amber-400 text-sm">-</b></span> 
+        <span class="text-white/20">|</span>
+        <span>현재 문양: <b id="suit-txt" class="text-lg">-</b></span> 
+        <span class="text-white/20">|</span>
+        <span>누적 공격: <b id="stack-txt" class="text-red-400 font-mono text-sm">0장</b></span> 
+        <span class="text-white/20">|</span>
+        <span>공격 유형: <b id="atk-txt" class="text-amber-300">없음</b></span>
+      </div>
+
+      <!-- 카드 더미 & 조작 버튼 -->
+      <div class="flex items-center justify-center gap-10 my-auto">
+        <!-- 덱 (카드 뽑기) -->
+        <div class="flex flex-col items-center gap-1.5">
+          <div onclick="act({t:'draw'})" class="card card-back flex items-center justify-center font-black text-xs text-white/90 hover:scale-105 transition cursor-pointer">DECK</div>
+          <span id="deck-cnt" class="text-xs text-emerald-300 font-bold font-mono">0장</span>
+        </div>
+
+        <!-- 중앙 버튼 및 메시지 -->
+        <div class="flex flex-col gap-2.5 items-center">
+          <button id="start-btn" onclick="act({t:'start'})" class="hidden px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 transition rounded-xl text-xs font-black shadow-xl animate-bounce">게임 시작</button>
+          <button id="pass-btn" onclick="act({t:'pass'})" class="hidden px-5 py-2 bg-amber-600 hover:bg-amber-500 transition rounded-xl text-xs font-black shadow-lg">턴 넘기기</button>
+          <div id="msg" class="text-xs text-amber-300 font-bold text-center min-h-[20px] max-w-[280px] bg-black/60 px-3 py-1 rounded-lg border border-amber-500/30"></div>
+        </div>
+
+        <!-- 바닥 (버려진 카드 더미) -->
+        <div class="flex flex-col items-center gap-1.5">
+          <div id="discard" class="zone w-[80px] h-[112px] flex items-center justify-center text-[11px] text-white/40 font-bold shadow-inner">DISCARD</div>
+          <span class="text-xs text-emerald-300 font-bold">바닥</span>
+        </div>
+      </div>
+
+      <!-- 규칙 요약 뱃지 -->
+      <div class="text-[11px] text-white/80 bg-black/50 px-4 py-1.5 rounded-full border border-white/15 flex gap-3 flex-wrap justify-center shadow">
+        <span><b>A(+5)</b>: A/JKR방어</span><span><b>2(+2)</b>: 2방어</span>
+        <span class="text-red-400 font-semibold"><b>JKR(+10)</b>: 조커방어</span><span><b>7</b>: 문양변경</span>
+        <span><b>J/Q/K</b>: 턴유지</span><span class="text-amber-400 font-bold"><b>26장 파산</b></span>
+      </div>
+    </div>
+
+    <!-- 내 영역 -->
+    <div class="w-full flex flex-col items-center gap-1.5">
+      <div id="my-hand" class="zone min-h-[125px] w-full max-w-4xl flex items-center justify-center gap-2 p-2 overflow-x-auto"></div>
+      <div class="flex items-center gap-2.5 bg-black/85 px-5 py-1.5 rounded-full border border-white/15 text-xs shadow-md">
+        <span class="font-bold text-emerald-400">내 손패</span>
+        <span id="my-cnt" class="bg-emerald-950 text-emerald-200 px-2.5 py-0.5 rounded-full font-mono font-bold border border-emerald-800/50">0장</span>
+        <span id="my-badge" class="hidden bg-amber-400 text-black px-2.5 py-0.5 rounded-full font-black animate-pulse shadow">내 차례!</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 문양 선택 모달 (숫자 7 발동 시) -->
+  <div id="modal" class="hidden fixed inset-0 bg-black/85 z-40 flex items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-gray-900 border border-amber-500/60 p-6 rounded-2xl text-center max-w-xs w-full shadow-2xl space-y-4">
+      <h3 class="text-sm font-black text-amber-400 tracking-wide">문양 변경 (숫자 7 발동)</h3>
+      <div class="grid grid-cols-2 gap-3">
+        <button onclick="act({t:'suit',s:'♠'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-black-suit rounded-xl border border-gray-700 shadow">♠</button>
+        <button onclick="act({t:'suit',s:'♥'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-red-suit rounded-xl border border-gray-700 shadow">♥</button>
+        <button onclick="act({t:'suit',s:'◆'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-red-suit rounded-xl border border-gray-700 shadow">◆</button>
+        <button onclick="act({t:'suit',s:'♣'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-black-suit rounded-xl border border-gray-700 shadow">♣</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 게임 종료 모달 -->
+  <div id="end-modal" class="hidden fixed inset-0 bg-black/85 z-40 flex items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-gray-900 border border-amber-500/60 p-6 rounded-2xl text-center max-w-xs w-full shadow-2xl space-y-4">
+      <h3 id="end-title" class="text-xl font-black text-amber-400"></h3>
+      <p id="end-desc" class="text-xs text-gray-300 leading-relaxed"></p>
+      <button onclick="act({t:'start'})" class="w-full py-3 bg-amber-500 hover:bg-amber-400 transition text-black font-extrabold rounded-xl text-xs shadow-lg shadow-amber-900/40">다시 시작하기</button>
+    </div>
+  </div>
+
+  <!-- 분리된 자바스크립트 로직 연결 -->
+  <script src="script.js"></script>
+</body>
+</html>
